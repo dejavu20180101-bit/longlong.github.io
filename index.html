@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>JARVIS Mobile Interface</title>
+    <style>
+        /* --- 基础样式 --- */
+        body { 
+            margin: 0; overflow: hidden; background-color: #000; 
+            font-family: 'Segoe UI', 'Roboto', monospace;
+            touch-action: none; /* 禁止浏览器默认的触摸行为 */
+        }
+        
+        #input_video { display: none; } /* 隐藏原始视频流 */
+        
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+
+        /* --- HUD 界面 (响应式布局) --- */
+        #hud-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2;
+            pointer-events: none;
+            background: radial-gradient(circle, transparent 50%, rgba(0, 10, 20, 0.9) 100%);
+            box-sizing: border-box;
+            padding: 20px;
+        }
+
+        .panel {
+            position: absolute;
+            background: rgba(0, 20, 30, 0.6);
+            border: 1px solid rgba(0, 255, 255, 0.4);
+            padding: 10px;
+            border-radius: 8px;
+            color: #00ffff;
+            backdrop-filter: blur(4px);
+            font-size: 14px;
+        }
+
+        /* 左上角面板 */
+        .top-left { top: 20px; left: 20px; max-width: 200px; }
+        
+        /* 右下角面板 */
+        .bottom-right { bottom: 20px; right: 20px; text-align: right; }
+
+        /* 顶部中央状态栏 */
+        .header-bar {
+            position: absolute; top: 0; left: 0; width: 100%; height: 4px;
+            background: linear-gradient(90deg, transparent, #00ffff, transparent);
+            box-shadow: 0 0 10px #00ffff;
+        }
+
+        h2 { margin: 0 0 5px 0; font-size: 12px; color: #fff; letter-spacing: 1px; border-bottom: 1px solid #00ffff55; }
+        p { margin: 2px 0; font-size: 11px; opacity: 0.8; }
+        .val { font-weight: bold; color: #fff; }
+
+        /* --- 启动按钮 (移动端往往需要用户点击才能播放视频/音频) --- */
+        #start-btn {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            z-index: 999;
+            padding: 15px 40px;
+            background: rgba(0, 255, 255, 0.1);
+            border: 2px solid #00ffff;
+            color: #00ffff;
+            font-size: 18px;
+            letter-spacing: 2px;
+            cursor: pointer;
+            border-radius: 30px;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+        }
+        #start-btn:active { background: rgba(0, 255, 255, 0.3); }
+
+        /* 状态指示 */
+        #status-msg {
+            position: absolute; bottom: 10%; left: 50%; transform: translateX(-50%);
+            color: #00ffff; font-size: 12px; letter-spacing: 2px;
+            text-shadow: 0 0 5px #00ffff;
+            text-align: center;
+        }
+    </style>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+
+    <div id="start-btn">INITIALIZE SYSTEM</div>
+
+    <video id="input_video" playsinline webkit-playsinline></video>
+    
+    <div id="canvas-container"></div>
+
+    <div id="hud-layer">
+        <div class="header-bar"></div>
+        
+        <div class="panel top-left">
+            <h2>SYS. STATUS</h2>
+            <p>FPS: <span id="fps" class="val">0</span></p>
+            <p>CAM: <span id="cam-status" class="val">OFFLINE</span></p>
+            <p>HAND: <span id="hand-status" class="val">WAITING</span></p>
+        </div>
+
+        <div id="status-msg">TAP BUTTON TO START</div>
+
+        <div class="panel bottom-right">
+            <h2>TERRA DATA</h2>
+            <p>RADIUS: <span class="val">6371 KM</span></p>
+            <p>ROTATION: <span class="val">1670 KM/H</span></p>
+        </div>
+    </div>
+
+    <script>
+        // ================= 配置参数 =================
+        const CONFIG = {
+            rotationSpeed: 0.001,
+            pinchThreshold: 0.05, // 捏合判定阈值
+            sensitivity: 4.0      // 手势旋转灵敏度
+        };
+
+        // ================= 1. THREE.JS 场景搭建 =================
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.0008); // 增加深邃感
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.z = 2.5;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制像素比以优化移动端性能
+        container.appendChild(renderer.domElement);
+
+        // --- 创建全息地球组 ---
+        const earthGroup = new THREE.Group();
+        scene.add(earthGroup);
+
+        // 核心球体 (深色遮挡)
+        const coreGeo = new THREE.SphereGeometry(1, 48, 48); // 面数适中，适配平板
+        const coreMat = new THREE.MeshPhongMaterial({
+            color: 0x001122, emissive: 0x000510, specular: 0x111111, shininess: 10,
+            transparent: true, opacity: 0.95
+        });
+        const earthCore = new THREE.Mesh(coreGeo, coreMat);
+        earthGroup.add(earthCore);
+
+        // 线框球体 (科技感来源)
+        const wireGeo = new THREE.WireframeGeometry(coreGeo);
+        const wireMat = new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.2 });
+        const wireMesh = new THREE.LineSegments(wireGeo, wireMat);
+        earthGroup.add(wireMesh);
+
+        // 星空背景
+        const starsGeo = new THREE.BufferGeometry();
+        const starsCount = 800; // 减少粒子数优化性能
+        const posArray = new Float32Array(starsCount * 3);
+        for(let i=0; i<starsCount*3; i++) posArray[i] = (Math.random()-0.5) * 20;
+        starsGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const starsMat = new THREE.PointsMaterial({ size: 0.02, color: 0x88ffff, transparent: true, opacity: 0.6 });
+        const starMesh = new THREE.Points(starsGeo, starsMat);
+        scene.add(starMesh);
+
+        // 灯光
+        const ambientLight = new THREE.AmbientLight(0x333333);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0x00ffff, 1.5);
+        dirLight.position.set(5, 3, 5);
+        scene.add(dirLight);
+
+        // ================= 2. 交互逻辑 (手势 + 触控) =================
+        let isPinching = false;
+        let lastHandPos = { x: 0, y: 0 };
+        let targetRot = { x: 0, y: 0 };
+
+        // MediaPipe 结果处理
+        function onResults(results) {
+            const handStatus = document.getElementById('hand-status');
+            const statusMsg = document.getElementById('status-msg');
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.len
